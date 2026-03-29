@@ -119,6 +119,7 @@ class Oscillator(PreTrainedModel, GenerationMixin):
     """
 
     config_class = OscillatorConfig
+    _tied_weights_keys = ["lm_head.weight"]  # tied to embed.weight
 
     def __init__(self, config: OscillatorConfig):
         super().__init__(config)
@@ -144,6 +145,19 @@ class Oscillator(PreTrainedModel, GenerationMixin):
                 nn.init.xavier_uniform_(module.weight)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+    # HF tied-weight hooks — needed for save/load to correctly re-tie lm_head ↔ embed
+    def get_input_embeddings(self):
+        return self.embed
+
+    def set_input_embeddings(self, value):
+        self.embed = value
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, value):
+        self.lm_head = value
 
     def make_pad_mask(self, x: torch.Tensor) -> torch.Tensor:
         return (x == self.cfg.pad_id).unsqueeze(1).unsqueeze(2)

@@ -29,10 +29,14 @@ class OscillatorConfig(PreTrainedConfig):
         adj_topk:      int | None = None,
         **kwargs,
     ):
+        # pop HF token ids from kwargs to avoid duplicate keyword arg on from_pretrained
+        _pad = kwargs.pop("pad_token_id", pad_id)
+        _bos = kwargs.pop("bos_token_id", bos_token_id)
+        _eos = kwargs.pop("eos_token_id", eos_token_id)
         super().__init__(
-            pad_token_id=pad_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
+            pad_token_id=_pad,
+            bos_token_id=_bos,
+            eos_token_id=_eos,
             **kwargs,
         )
         assert d_model % n_heads == 0, \
