@@ -193,7 +193,7 @@ class TopologyPropagation(nn.Module):
         lam_init   = max(cfg.lam, 1e-3)
         init_logit = math.log(lam_init / (1.0 - lam_init))
         self.logit_lam   = nn.Parameter(torch.tensor(init_logit))
-        self.log_alpha   = nn.Parameter(torch.tensor(-3.0))
+        self.log_alpha   = nn.Parameter(torch.tensor(0.0))   # sigmoid(0)=0.5, D_0 残差更强
         self.logit_theta = nn.Parameter(torch.tensor(-4.0))  # θ init ≈ 0.018，训练初期几乎不冻结
 
         # 统计：记录每个 forward 的 active 比例（仅推理诊断）
@@ -311,17 +311,21 @@ class OscillatorAttention(nn.Module):
         D_prime = self.propagate(D, A)                # (B, h, T, d_k) complex
 
         # ── 相位同步注意力矩阵 ────────────────────────────────
-        # 先归一化：D'_unit = D' / |D'|，使每个 token 的振荡指向为单位复数向量
-        # 这样 Re(D'_unit_i · D'_unit_j*) = cos(相位差) ∈ [-1, 1]
-        # 等价于 Kuramoto 相位对齐度的精确计算
-        # 解决原始 Re(D'·D'*) 因 |D'|² 过大导致 softmax 极度尖锐的问题
-        # 归一化为单位复数向量：Re(D_unit_i · D_unit_j*) = cos(相位差) ∈ [-1,1]
-        # 复数余弦相似度的统计方差 ≈ 1/(2·d_k)，正确缩放为 × √(2·d_k)
-        # （类比：实数 QK^T 方差 ≈ d_k，缩放为 /√dk；复数版方差更小，需要更大的缩放）
-        D_norm = D_prime.abs().pow(2).sum(-1, keepdim=True).sqrt().clamp(min=1e-6)
-        D_unit = D_prime / D_norm                              # (B, h, T, d_k) unit complex
+        # 问题：传播后所有 token 趋向同一均值场方向，绝对相位全部对齐
+        #       → Re(D_unit_i · D_unit_j*) ≈ 1 for all i,j → attention 均匀失效
+        #
+        # 修复（v3）：减去均值场（mean-field subtraction），只用相对相位差
+        #   D_centered = D' - mean_T(D')   ← 移除公共同步方向
+        #   D_unit = D_centered / |D_centered|
+        #   phase_sim = Re(D_unit · D_unit*) / √d_k   ← 标准 attention 缩放
+        #
+        # 物理含义：Kuramoto 同步中真正有信息的是 token 相对于均值场的偏差，
+        #           不是绝对相位（绝对相位只反映整体同步程度，无区分性）
+        D_centered = D_prime - D_prime.mean(dim=2, keepdim=True)   # subtract mean over T
+        D_norm = D_centered.abs().pow(2).sum(-1, keepdim=True).sqrt().clamp(min=1e-6)
+        D_unit = D_centered / D_norm                               # (B, h, T, d_k) unit complex
         phase_sim = torch.matmul(D_unit, D_unit.conj().transpose(-2, -1)).real
-        phase_sim = phase_sim * math.sqrt(2.0 * self.d_k)
+        phase_sim = phase_sim * math.sqrt(2.0 * self.d_k)            # scale to std≈1 for unit complex vectors
         if mask is not None:
             phase_sim = phase_sim.masked_fill(mask, float("-inf"))
         # 稀疏坍缩：只保留 top-k 相位对齐的 token 对
