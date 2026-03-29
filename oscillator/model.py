@@ -1,6 +1,6 @@
 # oscillator/model.py
 """
-Oscillator — 完整模型
+Oscillator — 振荡器语言模型，兼容 HuggingFace PreTrainedModel。
 
 架构：
     Input tokens
@@ -33,6 +33,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.modeling_utils import PreTrainedModel
+from transformers.generation.utils import GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .config import OscillatorConfig
 from .attention import OscillatorAttention
@@ -79,9 +82,6 @@ class OscillatorBlock(nn.Module):
     """单个 Oscillator 层。
 
     OscillatorAttention → Add & LayerNorm → FeedForward → Add & LayerNorm
-
-    与 Transformer EncoderBlock 的唯一区别：
-        MultiHeadAttention → OscillatorAttention
     """
 
     def __init__(self, cfg: OscillatorConfig):
@@ -105,42 +105,45 @@ class OscillatorBlock(nn.Module):
 
 # ── Oscillator（完整模型）─────────────────────────────────────────────
 
-class Oscillator(nn.Module):
-    """振荡器语言模型。
+class Oscillator(PreTrainedModel, GenerationMixin):
+    """振荡器语言模型，基于相位动力学的 Transformer 替代架构。
 
-    基于相位动力学的 Transformer 替代架构：
-    注意力权重不由 Q·K^T 算出，而是由振荡指向数的传播动力学涌现。
+    兼容 HuggingFace PreTrainedModel：
+      - 支持 model.save_pretrained() / from_pretrained()
+      - 支持 model.generate()（继承自 GenerationMixin）
+      - forward() 返回 CausalLMOutputWithPast，兼容 output["logits"]
 
     Parameters
     ----------
-    cfg : OscillatorConfig
-
-    Notes
-    -----
-    与 Transformer 的参数量对比（相同 d_model/n_heads）：
-    - 多出：W_re, W_im（相位编码）= 2 × d_model²
-    - 少出：无。W_Q/W_K/W_V/W_O 都保留（W_Q,W_K 用于邻接，W_V,W_O 用于输出）
-    - 多出：logit_lam（每层 1 个可学习标量）
-    - 净增：每层多 2 × d_model² 参数（相位编码层）
+    config : OscillatorConfig
     """
 
-    def __init__(self, cfg: OscillatorConfig):
-        super().__init__()
-        self.cfg = cfg
+    config_class = OscillatorConfig
 
-        self.embed   = nn.Embedding(cfg.vocab_size, cfg.d_model, padding_idx=cfg.pad_id)
-        self.pos_enc = PositionalEncoding(cfg.d_model, cfg.max_seq_len, cfg.dropout)
-        self.layers  = nn.ModuleList([OscillatorBlock(cfg) for _ in range(cfg.n_layers)])
-        self.norm    = nn.LayerNorm(cfg.d_model)
-        self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+    def __init__(self, config: OscillatorConfig):
+        super().__init__(config)
+        self.cfg = config   # 保留 self.cfg 供现有代码访问
 
+        self.embed   = nn.Embedding(config.vocab_size, config.d_model,
+                                    padding_idx=config.pad_id)
+        self.pos_enc = PositionalEncoding(config.d_model, config.max_seq_len,
+                                          config.dropout)
+        self.layers  = nn.ModuleList(
+            [OscillatorBlock(config) for _ in range(config.n_layers)]
+        )
+        self.norm    = nn.LayerNorm(config.d_model)
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.lm_head.weight = self.embed.weight   # tie embeddings
-        self._init_weights()
 
-    def _init_weights(self):
-        for p in self.parameters():
-            if p.is_floating_point() and p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        self.post_init()   # HF 标准初始化钩子
+
+    def _init_weights(self, module):
+        """HF PreTrainedModel 要求实现此方法。"""
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            if module.weight.dim() > 1:
+                nn.init.xavier_uniform_(module.weight)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def make_pad_mask(self, x: torch.Tensor) -> torch.Tensor:
         return (x == self.cfg.pad_id).unsqueeze(1).unsqueeze(2)
@@ -151,32 +154,41 @@ class Oscillator(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,
-        causal: bool = False,
-    ) -> dict:
+        input_ids:      torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels:         Optional[torch.Tensor] = None,
+        causal:         bool = True,
+        **kwargs,
+    ) -> CausalLMOutputWithPast:
         """
         Parameters
         ----------
-        tokens : (B, T)
-        causal : bool
+        input_ids      : (B, T)
+        attention_mask : (B, T)  — 1 = keep, 0 = mask（HF 标准；内部转为 bool mask）
+        labels         : (B, T)  — -100 表示忽略位置
+        causal         : bool    — 是否使用因果掩码（默认 True，用于自回归生成）
 
         Returns
         -------
-        dict:
-            logits       : (B, T, vocab_size)
-            hidden       : (B, T, d_model)
-            gates        : list of (B, h, T, d_k)  — 每层坍缩门控（可视化用）
-            lam_values   : list of float — 每层当前耦合系数 λ
+        CausalLMOutputWithPast
+            .loss   : scalar（仅当传入 labels 时）
+            .logits : (B, T, vocab_size)
         """
-        B, T = tokens.shape
+        B, T = input_ids.shape
 
-        pad_mask = self.make_pad_mask(tokens)
+        # 构建掩码
+        pad_mask = self.make_pad_mask(input_ids)
         if causal:
-            mask = pad_mask | self.make_causal_mask(T, tokens.device)
+            mask = pad_mask | self.make_causal_mask(T, input_ids.device)
         else:
             mask = pad_mask
 
-        x = self.pos_enc(self.embed(tokens) * math.sqrt(self.cfg.d_model))
+        # 如果上层传了 attention_mask（HF 格式 1/0），合并进来
+        if attention_mask is not None:
+            hf_mask = (attention_mask == 0).unsqueeze(1).unsqueeze(2)
+            mask = mask | hf_mask
+
+        x = self.pos_enc(self.embed(input_ids) * math.sqrt(self.cfg.d_model))
 
         gates      = []
         lam_values = []
@@ -190,12 +202,26 @@ class Oscillator(nn.Module):
         x      = self.norm(x)
         logits = self.lm_head(x)
 
-        return {
-            "logits":     logits,
-            "hidden":     x,
-            "gates":      gates,
-            "lam_values": lam_values,
-        }
+        loss = None
+        if labels is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+            )
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+        )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ) -> dict:
+        """HF generate() 每步调用此方法准备输入。"""
+        return {"input_ids": input_ids}
 
     def param_count(self) -> str:
         n = sum(p.numel() for p in self.parameters())

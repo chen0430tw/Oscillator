@@ -1,48 +1,55 @@
 # oscillator/config.py
 from __future__ import annotations
-from dataclasses import dataclass
+from transformers.configuration_utils import PretrainedConfig as PreTrainedConfig
 
 
-@dataclass
-class OscillatorConfig:
-    # ── Token / sequence ──────────────────────────────────────
-    vocab_size:   int   = 32000
-    max_seq_len:  int   = 512
-    d_model:      int   = 512
-    n_heads:      int   = 8
-    n_layers:     int   = 6
-    d_ff:         int   = 2048
-    dropout:      float = 0.1
-    pad_id:       int   = 0
+class OscillatorConfig(PreTrainedConfig):
+    """Oscillator 模型配置，兼容 HuggingFace PreTrainedConfig。"""
 
-    # ── Oscillator-specific ───────────────────────────────────
-    # n_otal_steps: propagation steps (depth of phase evolution)
-    # Transformer analogue: none — this has no equivalent.
-    # More steps → slower but deeper phase synchronization.
-    n_otal_steps: int   = 3
+    model_type = "oscillator"
 
-    # lam: neighborhood coupling coefficient (λ in OTAL update rule)
-    # D_i(t+Δt) = (1-λ)·D_i + λ·Σ Ã_ij·D_j
-    # λ→0: each token ignores neighbors (identity)
-    # λ→1: token fully replaced by neighbor average
-    lam:          float = 0.3
+    def __init__(
+        self,
+        # ── Token / sequence ──────────────────────────────────────
+        vocab_size:    int   = 32000,
+        max_seq_len:   int   = 512,
+        d_model:       int   = 512,
+        n_heads:       int   = 8,
+        n_layers:      int   = 6,
+        d_ff:          int   = 2048,
+        dropout:       float = 0.1,
+        pad_id:        int   = 0,
+        bos_token_id:  int   = 1,
+        eos_token_id:  int   = 2,
+        # ── Oscillator-specific ───────────────────────────────────
+        n_otal_steps:  int   = 3,
+        lam:           float = 0.3,
+        collapse_mode: str   = "phase_align",
+        phase_topk:    int | None = None,
+        adj_topk:      int | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            pad_token_id=pad_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            **kwargs,
+        )
+        assert d_model % n_heads == 0, \
+            f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
 
-    # collapse_mode: how to convert complex D → real attention gate
-    # "phase_align" : alignment with mean-field direction (Kuramoto-inspired)
-    # "amplitude"   : |D|² normalized across tokens
-    collapse_mode: str  = "phase_align"
-
-    # phase_topk: sparse phase attention — only keep top-k aligned token pairs
-    # None → dense (full T×T); int → sparse O(T·k) memory
-    # Quantum analogue: partial collapse — only the k strongest-coupled
-    # oscillator pairs participate in phase synchronization.
-    phase_topk: int | None = None
-
-    # adj_topk: sparse initial adjacency Ã — top-k neighbors per token
-    # None → dense softmax; int → sparse O(T·k)
-    adj_topk:   int | None = None
-
-    def __post_init__(self):
-        assert self.d_model % self.n_heads == 0, \
-            f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
-        self.d_k = self.d_model // self.n_heads
+        self.vocab_size    = vocab_size
+        self.max_seq_len   = max_seq_len
+        self.d_model       = d_model
+        self.n_heads       = n_heads
+        self.n_layers      = n_layers
+        self.d_ff          = d_ff
+        self.dropout       = dropout
+        self.pad_id        = pad_id
+        self.n_otal_steps  = n_otal_steps
+        self.lam           = lam
+        self.collapse_mode = collapse_mode
+        self.phase_topk    = phase_topk
+        self.adj_topk      = adj_topk
+        self.d_k           = d_model // n_heads
+        self.num_hidden_layers = n_layers   # required by HF DynamicCache in generate()
