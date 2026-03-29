@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
 # oscillator/example.py
 """
 Oscillator vs Transformer 对比验证。
@@ -6,11 +8,9 @@ Oscillator vs Transformer 对比验证。
     py -3.13 oscillator/example.py
 """
 
-from __future__ import annotations
-
-import sys, math
+import sys, io, math
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.path.insert(0, ".")
-
 import torch
 from oscillator.model import Oscillator
 from oscillator.config import OscillatorConfig
