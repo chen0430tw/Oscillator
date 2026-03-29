@@ -32,6 +32,16 @@ class OscillatorConfig:
     # "amplitude"   : |D|² normalized across tokens
     collapse_mode: str  = "phase_align"
 
+    # phase_topk: sparse phase attention — only keep top-k aligned token pairs
+    # None → dense (full T×T); int → sparse O(T·k) memory
+    # Quantum analogue: partial collapse — only the k strongest-coupled
+    # oscillator pairs participate in phase synchronization.
+    phase_topk: int | None = None
+
+    # adj_topk: sparse initial adjacency Ã — top-k neighbors per token
+    # None → dense softmax; int → sparse O(T·k)
+    adj_topk:   int | None = None
+
     def __post_init__(self):
         assert self.d_model % self.n_heads == 0, \
             f"d_model ({self.d_model}) must be divisible by n_heads ({self.n_heads})"
