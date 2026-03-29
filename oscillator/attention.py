@@ -51,8 +51,8 @@ class PhaseEncoding(nn.Module):
         → D: (B, h, T, d_k)  complex64/128
         """
         B, T, _ = x.shape
-        re = self.W_re(x).view(B, T, self.h, self.d_k).transpose(1, 2)
-        im = self.W_im(x).view(B, T, self.h, self.d_k).transpose(1, 2)
+        re = self.W_re(x).view(B, T, self.h, self.d_k).transpose(1, 2).float()
+        im = self.W_im(x).view(B, T, self.h, self.d_k).transpose(1, 2).float()
         return torch.complex(re, im)
 
 
