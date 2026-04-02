@@ -53,7 +53,7 @@ class PhaseEncoding(nn.Module):
         B, T, _ = x.shape
         re = self.W_re(x).view(B, T, self.h, self.d_k).transpose(1, 2).float()
         im = self.W_im(x).view(B, T, self.h, self.d_k).transpose(1, 2).float()
-        return torch.complex(re, im)
+        return torch.cat([re, im], dim=-1)  # (B, h, T, 2*d_k) real, [:d_k]=re, [d_k:]=im
 
 
 def _sparse_softmax(scores: torch.Tensor, k: int) -> torch.Tensor:
@@ -241,9 +241,7 @@ def _inertial_step(
     # ── bmm: (N_active,1,T) × (N_active,T,d_k) → (N_active,1,d_k) ─
     # A 是实数，D 是复数 → 两次实数 bmm，梯度正常传播
     A_3d    = A_rows.unsqueeze(1)              # (N_active, 1, T)
-    nb_re   = torch.bmm(A_3d, D_full.real).squeeze(1)   # (N_active, d_k)
-    nb_im   = torch.bmm(A_3d, D_full.imag).squeeze(1)
-    neighbor = torch.complex(nb_re, nb_im)
+    neighbor = torch.bmm(A_3d, D_full).squeeze(1)        # (N_active, 2*d_k) real
 
     # ── update & scatter ───────────────────────────────────────────
     D_active = D_flat[bh_idx, tok_idx]         # (N_active, d_k)
@@ -295,12 +293,11 @@ class TopologyPropagation(nn.Module):
         BH = B * h
         D_0  = D
         lam  = torch.sigmoid(self.logit_lam)
-        A_c  = A.to(D.dtype)
 
         self.last_active_ratios = []
 
         for _ in range(self.n_steps):
-            neighbor = torch.matmul(A_c, D)
+            neighbor = torch.matmul(A, D)   # A and D are both float32
             D = (1.0 - lam) * D + lam * neighbor
             self.last_active_ratios.append(1.0)   # 全量计算，保持接口兼容
 
@@ -333,7 +330,7 @@ class CollapseReadout(nn.Module):
         → gate  : (B, h, T, d_k)  real ∈ (0,1)
         """
         # 拼接实部和虚部：(B, h, T, 2*d_k)
-        features = torch.cat([D.real, D.imag], dim=-1)
+        features = D  # already [re, im] concatenated, shape (B, h, T, 2*d_k)
         # 线性投影 → sigmoid 门控
         gate = torch.sigmoid(self.proj(features))      # (B, h, T, d_k)
         return gate
@@ -408,9 +405,12 @@ class OscillatorAttention(nn.Module):
         # 物理含义：Kuramoto 同步中真正有信息的是 token 相对于均值场的偏差，
         #           不是绝对相位（绝对相位只反映整体同步程度，无区分性）
         D_centered = D_prime - D_prime.mean(dim=2, keepdim=True)   # subtract mean over T
-        D_norm = D_centered.abs().pow(2).sum(-1, keepdim=True).sqrt().clamp(min=1e-6)
-        D_unit = D_centered / D_norm                               # (B, h, T, d_k) unit complex
-        phase_sim = torch.matmul(D_unit, D_unit.conj().transpose(-2, -1)).real
+        D_norm = D_centered.pow(2).sum(-1, keepdim=True).sqrt().clamp(min=1e-6)
+        D_unit = D_centered / D_norm                               # (B, h, T, 2*d_k) unit real
+        # Re(D_i·D_j*) = D_re_i·D_re_j + D_im_i·D_im_j
+        _dk = D_unit.shape[-1] // 2
+        phase_sim = (torch.matmul(D_unit[..., :_dk], D_unit[..., :_dk].transpose(-2, -1))
+                   + torch.matmul(D_unit[..., _dk:], D_unit[..., _dk:].transpose(-2, -1)))
         phase_sim = phase_sim * math.sqrt(2.0 * self.d_k)            # scale to std≈1 for unit complex vectors
         if mask is not None:
             phase_sim = phase_sim.masked_fill(mask, float("-inf"))

@@ -209,8 +209,9 @@ class Oscillator(PreTrainedModel, GenerationMixin):
         for layer in self.layers:
             x, gate = layer(x, mask)
             gates.append(gate)
+            # .item() removed: causes graph break under torch.compile
             lam_values.append(
-                torch.sigmoid(layer.attn.propagate.logit_lam).item()
+                torch.sigmoid(layer.attn.propagate.logit_lam).detach()
             )
 
         x      = self.norm(x)
