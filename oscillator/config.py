@@ -25,6 +25,9 @@ class OscillatorConfig(PreTrainedConfig):
         n_otal_steps:  int   = 3,
         lam:           float = 0.3,
         collapse_mode: str   = "phase_align",
+        adj_mode:      str   = "learned",
+        local_window:  int   = 2,
+        adj_mix_beta:  float | None = None,
         phase_topk:    int | None = None,
         adj_topk:      int | None = None,
         **kwargs,
@@ -53,6 +56,9 @@ class OscillatorConfig(PreTrainedConfig):
         self.n_otal_steps  = n_otal_steps
         self.lam           = lam
         self.collapse_mode = collapse_mode
+        self.adj_mode      = adj_mode
+        self.local_window  = local_window
+        self.adj_mix_beta  = adj_mix_beta
         self.phase_topk    = phase_topk
         self.adj_topk      = adj_topk
         self.d_k           = d_model // n_heads

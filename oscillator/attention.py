@@ -75,6 +75,63 @@ def _sparse_softmax(scores: torch.Tensor, k: int) -> torch.Tensor:
     return F.softmax(sparse, dim=-1)
 
 
+def _normalize_rows(A: torch.Tensor) -> torch.Tensor:
+    """按最后一维做行归一化，避免构造固定图时出现除零。"""
+    return A / A.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+
+
+def _apply_mask_and_normalize(
+    A: torch.Tensor,
+    mask: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Apply attention-style bool mask and renormalize rows."""
+    if mask is not None:
+        A = A.masked_fill(mask, 0.0)
+    return _normalize_rows(A)
+
+
+def _build_local_window_adjacency(
+    B: int,
+    h: int,
+    T: int,
+    window: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """固定局部窗口图，每个 token 只连到自身附近的 token。"""
+    idx = torch.arange(T, device=device)
+    dist = (idx[:, None] - idx[None, :]).abs()
+    A = (dist <= max(0, window)).to(dtype)
+    A = _normalize_rows(A)
+    return A.view(1, 1, T, T).expand(B, h, T, T)
+
+
+def _build_identity_adjacency(
+    B: int,
+    h: int,
+    T: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """固定恒等图，只保留 token 自环。"""
+    A = torch.eye(T, device=device, dtype=dtype)
+    return A.view(1, 1, T, T).expand(B, h, T, T)
+
+
+def _build_uniform_adjacency(
+    B: int,
+    h: int,
+    T: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Content-blind but distance-biased graph before masking."""
+    idx = torch.arange(T, device=device)
+    dist = (idx[:, None] - idx[None, :]).abs().to(dtype)
+    A = 1.0 / (1.0 + dist)
+    return A.view(1, 1, T, T).expand(B, h, T, T)
+
+
 class AdjacencyBuilder(nn.Module):
     """从 token 嵌入构建归一化邻接矩阵 Ã ∈ [0,1]^{B×h×T×T}。
 
@@ -91,7 +148,10 @@ class AdjacencyBuilder(nn.Module):
         super().__init__()
         self.h        = cfg.n_heads
         self.d_k      = cfg.d_k
+        self.adj_mode = cfg.adj_mode
         self.adj_topk = cfg.adj_topk
+        self.local_window = cfg.local_window
+        self.adj_mix_beta = cfg.adj_mix_beta
         self.W_Q = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.W_K = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.drop = nn.Dropout(cfg.dropout)
@@ -107,16 +167,42 @@ class AdjacencyBuilder(nn.Module):
         → Ã : (B, h, T, T)
         """
         B, T, _ = x.shape
+        if self.adj_mode == "identity":
+            A = _build_identity_adjacency(B, self.h, T, x.device, x.dtype)
+            return _apply_mask_and_normalize(A, mask)
+
+        if self.adj_mode == "local_window":
+            A = _build_local_window_adjacency(
+                B, self.h, T, self.local_window, x.device, x.dtype
+            )
+            return _apply_mask_and_normalize(A, mask)
+
+        if self.adj_mode == "blind_uniform":
+            A = _build_uniform_adjacency(B, self.h, T, x.device, x.dtype)
+            return _apply_mask_and_normalize(A, mask)
+
         Q = self.W_Q(x).view(B, T, self.h, self.d_k).transpose(1, 2)
         K = self.W_K(x).view(B, T, self.h, self.d_k).transpose(1, 2)
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         if mask is not None:
             scores = scores.masked_fill(mask, float("-inf"))
         if self.adj_topk is not None:
-            A = _sparse_softmax(scores, self.adj_topk)
+            A_qk = _sparse_softmax(scores, self.adj_topk)
         else:
-            A = F.softmax(scores, dim=-1)
-        return self.drop(A)
+            A_qk = F.softmax(scores, dim=-1)
+
+        if self.adj_mode == "learned":
+            return self.drop(A_qk)
+
+        if self.adj_mode == "mixed_local":
+            A_local = _build_local_window_adjacency(
+                B, self.h, T, self.local_window, x.device, x.dtype
+            )
+            beta = self.adj_mix_beta if self.adj_mix_beta is not None else 0.1
+            A = (1.0 - beta) * A_local + beta * A_qk
+            return self.drop(_apply_mask_and_normalize(A, mask))
+
+        raise ValueError(f"Unknown adj_mode: {self.adj_mode}")
 
 
 def _inertial_step(

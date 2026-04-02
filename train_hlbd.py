@@ -47,15 +47,16 @@ class CharTokenizer:
         chars = sorted(set("".join(texts)))
         self.pad_id  = 0
         self.unk_id  = 1
-        self._ch2id  = {c: i+2 for i, c in enumerate(chars)}
-        self._id2ch  = {i+2: c for i, c in enumerate(chars)}
-        self.vocab_size = len(chars) + 2
+        self.sep_id  = 2
+        self._ch2id  = {c: i+3 for i, c in enumerate(chars)}
+        self._id2ch  = {i+3: c for i, c in enumerate(chars)}
+        self.vocab_size = len(chars) + 3
 
     def encode(self, text: str) -> list[int]:
         return [self._ch2id.get(c, self.unk_id) for c in text]
 
     def decode(self, ids: list[int]) -> str:
-        return "".join(self._id2ch.get(i, "?") for i in ids if i > 1)
+        return "".join(self._id2ch.get(i, "?") for i in ids if i > 2)
 
 
 # ── 3. Dataset ─────────────────────────────────────────────────────────
@@ -66,7 +67,8 @@ class TextDataset(Dataset):
         all_ids = []
         for t in texts:
             all_ids.extend(tok.encode(t))
-            all_ids.append(tok.pad_id)   # 样本间分隔
+            # Use a non-pad separator in the packed token stream.
+            all_ids.append(tok.sep_id)
         self.ids     = torch.tensor(all_ids, dtype=torch.long)
         self.seq_len = seq_len
 
@@ -181,9 +183,22 @@ def main():
     # top-k = T//4 = 12，即每个 token 只和最对齐的 12 个 token 同步
     TOPK = SEQ_LEN // 4
     t_cfg        = TransformerConfig(**common)
-    osc_cfg      = OscillatorConfig(**common, n_otal_steps=3, lam=0.3)
-    osc_sp_cfg   = OscillatorConfig(**common, n_otal_steps=3, lam=0.3,
-                                    phase_topk=TOPK, adj_topk=TOPK)
+    osc_cfg      = OscillatorConfig(
+        **common,
+        n_otal_steps=3,
+        lam=0.3,
+        adj_mode="mixed_local",
+        adj_mix_beta=0.30,
+    )
+    osc_sp_cfg   = OscillatorConfig(
+        **common,
+        n_otal_steps=3,
+        lam=0.3,
+        adj_mode="mixed_local",
+        adj_mix_beta=0.30,
+        phase_topk=TOPK,
+        adj_topk=TOPK,
+    )
 
     transformer   = Transformer(t_cfg)
     oscillator    = Oscillator(osc_cfg)

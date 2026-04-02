@@ -45,15 +45,16 @@ class CharTokenizer:
         chars = sorted(set("".join(texts)))
         self.pad_id  = 0
         self.unk_id  = 1
-        self._ch2id  = {c: i+2 for i, c in enumerate(chars)}
-        self._id2ch  = {i+2: c for i, c in enumerate(chars)}
-        self.vocab_size = len(chars) + 2
+        self.sep_id  = 2
+        self._ch2id  = {c: i+3 for i, c in enumerate(chars)}
+        self._id2ch  = {i+3: c for i, c in enumerate(chars)}
+        self.vocab_size = len(chars) + 3
 
     def encode(self, text: str) -> list[int]:
         return [self._ch2id.get(c, self.unk_id) for c in text]
 
     def decode(self, ids: list[int]) -> str:
-        return "".join(self._id2ch.get(i, "?") for i in ids if i > 1)
+        return "".join(self._id2ch.get(i, "?") for i in ids if i > 2)
 
 
 # ── 3. Dataset ─────────────────────────────────────────────────────
@@ -63,7 +64,8 @@ class TextDataset(Dataset):
         all_ids = []
         for t in texts:
             all_ids.extend(tok.encode(t))
-            all_ids.append(tok.pad_id)
+            # Use a non-pad separator in the packed token stream.
+            all_ids.append(tok.sep_id)
         self.ids     = torch.tensor(all_ids, dtype=torch.long)
         self.seq_len = seq_len
 
@@ -138,7 +140,7 @@ def generate(model, tok, prefix: str, max_new: int, seq_len: int,
             probs  = F.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, 1).item()
             ids = torch.cat([ids, torch.tensor([[next_id]], device=device)], dim=1)
-            if next_id == tok.pad_id or next_id == stop_id:
+            if next_id in {tok.pad_id, tok.sep_id, stop_id}:
                 break
     return tok.decode(ids[0].tolist())
 
@@ -179,6 +181,10 @@ def main():
         dropout      = 0.15,
         n_otal_steps = 3,
         lam          = 0.3,
+        # Current best default from broad real-data sweep:
+        # local prior logits + learned residual logits, beta = 0.30
+        adj_mode     = "mixed_local",
+        adj_mix_beta = 0.30,
         phase_topk   = SEQ_LEN // 4,
         adj_topk     = SEQ_LEN // 4,
     )
